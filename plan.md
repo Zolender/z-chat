@@ -1,0 +1,1424 @@
+# z-chat — Implementation Plan
+
+> Design spec: [`docs/superpowers/specs/2026-06-09-z-chat-design.md`](docs/superpowers/specs/2026-06-09-z-chat-design.md)
+> This file tracks the backend plan. A frontend plan will be added once the backend is complete.
+
+---
+
+# z-chat Backend Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build the complete z-chat backend — Express REST API for auth and rooms, Socket.IO real-time layer for messaging and DMs, Prisma + Supabase for persistence.
+
+**Architecture:** HTTP handles stateless operations (auth, room listing); Socket.IO handles all real-time operations (messaging, presence, DMs). A JWT issued via HTTP is passed as the socket handshake credential and verified by Socket.IO middleware before any event handler runs. The Express `app` and the Socket.IO `initSocket` function are kept in separate modules so tests can use the app without starting a server.
+
+**Tech Stack:** Node.js, Express 4, Socket.IO 4, Prisma 5, Supabase (PostgreSQL), jsonwebtoken, bcryptjs, TypeScript 5, Vitest, Supertest
+
+---
+
+## File Map
+
+| File | Responsibility |
+|---|---|
+| `package.json` (root) | npm workspaces config |
+| `backend/package.json` | Dependencies and scripts |
+| `backend/tsconfig.json` | TypeScript compiler config |
+| `backend/vitest.config.ts` | Test runner config with dotenv setup |
+| `backend/.env.example` | Required environment variables |
+| `backend/prisma/schema.prisma` | Database schema — all four models |
+| `backend/prisma/seed.ts` | Seeds the three predefined rooms |
+| `backend/src/types/index.ts` | Shared TypeScript interfaces |
+| `backend/src/lib/prisma.ts` | Prisma client singleton |
+| `backend/src/app.ts` | Express app — middleware + routes mounted |
+| `backend/src/index.ts` | Server entry — httpServer + Socket.IO + listen |
+| `backend/src/middleware/auth.ts` | JWT verification middleware for HTTP routes |
+| `backend/src/routes/auth.ts` | POST /auth/register, /login, /refresh, /logout |
+| `backend/src/routes/rooms.ts` | GET /rooms with isMember flag |
+| `backend/src/socket/index.ts` | Socket.IO init + JWT handshake middleware |
+| `backend/src/socket/handlers/rooms.ts` | join-room, leave-room, create-room, open-dm |
+| `backend/src/socket/handlers/messages.ts` | send-message with membership check |
+| `backend/tests/setup.ts` | Loads .env before tests run |
+| `backend/tests/auth.test.ts` | Auth route integration tests |
+| `backend/tests/rooms.test.ts` | Rooms route integration tests |
+| `backend/tests/socket.test.ts` | Socket event integration tests |
+
+---
+
+## Task 1: Monorepo + Backend Scaffolding
+
+**Files:**
+- Create: `package.json`
+- Create: `backend/package.json`
+- Create: `backend/tsconfig.json`
+- Create: `backend/vitest.config.ts`
+- Create: `backend/.env.example`
+- Create: `backend/tests/setup.ts`
+
+- [ ] **Step 1: Create root workspace package.json**
+
+This tells npm that `backend` and `frontend` are independent packages that share a single `node_modules` at the root.
+
+```json
+{
+  "name": "z-chat",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ]
+}
+```
+
+- [ ] **Step 2: Create backend/package.json**
+
+```json
+{
+  "name": "z-chat-backend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:studio": "prisma studio"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "socket.io": "^4.8.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node": "^22.0.0",
+    "@types/supertest": "^6.0.2",
+    "prisma": "^5.22.0",
+    "socket.io-client": "^4.8.0",
+    "supertest": "^7.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}
+```
+
+- [ ] **Step 3: Create backend/tsconfig.json**
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "CommonJS",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist", "tests"]
+}
+```
+
+- [ ] **Step 4: Create backend/vitest.config.ts**
+
+Vitest needs to know about `.env` before any test file runs. The `setupFiles` entry handles this.
+
+```ts
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    setupFiles: ['./tests/setup.ts'],
+  },
+})
+```
+
+- [ ] **Step 5: Create backend/tests/setup.ts**
+
+```ts
+import 'dotenv/config'
+```
+
+- [ ] **Step 6: Create backend/.env.example**
+
+```env
+DATABASE_URL="postgresql://USER:PASSWORD@HOST:PORT/DB?schema=public"
+JWT_ACCESS_SECRET="change-me-access"
+JWT_REFRESH_SECRET="change-me-refresh"
+PORT=4000
+CLIENT_ORIGIN="http://localhost:5173"
+```
+
+Copy this to `backend/.env` and fill in your Supabase connection string and secure secrets.
+
+- [ ] **Step 7: Install dependencies**
+
+```bash
+cd backend && npm install
+```
+
+Expected: Packages installed, `node_modules` created, no errors.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add package.json backend/package.json backend/tsconfig.json backend/vitest.config.ts backend/.env.example backend/tests/setup.ts
+git commit -m "chore: monorepo scaffold with backend workspace"
+```
+
+---
+
+## Task 2: Prisma Schema + Seed
+
+**Files:**
+- Create: `backend/prisma/schema.prisma`
+- Create: `backend/prisma/seed.ts`
+
+Prisma is a type-safe ORM. You write a schema, run a migration, and Prisma generates a fully-typed TypeScript client. The generated types (e.g., `User`, `Room`, `Message`) are imported from `@prisma/client` throughout the project.
+
+- [ ] **Step 1: Write the Prisma schema**
+
+```prisma
+// backend/prisma/schema.prisma
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RoomType {
+  PREDEFINED
+  USER_CREATED
+  DIRECT
+}
+
+model User {
+  id            String       @id @default(uuid())
+  username      String       @unique
+  email         String       @unique
+  passwordHash  String
+  refreshToken  String?
+  createdAt     DateTime     @default(now())
+  messages      Message[]
+  roomsCreated  Room[]       @relation("RoomCreator")
+  memberships   RoomMember[]
+}
+
+model Room {
+  id          String       @id @default(uuid())
+  name        String
+  description String?
+  type        RoomType     @default(USER_CREATED)
+  createdById String?
+  createdAt   DateTime     @default(now())
+  createdBy   User?        @relation("RoomCreator", fields: [createdById], references: [id])
+  messages    Message[]
+  members     RoomMember[]
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  content   String
+  createdAt DateTime @default(now())
+  userId    String
+  roomId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room      Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+}
+
+model RoomMember {
+  id       String   @id @default(uuid())
+  userId   String
+  roomId   String
+  joinedAt DateTime @default(now())
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  room     Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roomId])
+}
+```
+
+- [ ] **Step 2: Generate the Prisma client**
+
+```bash
+cd backend && npx prisma generate
+```
+
+Expected: `✔ Generated Prisma Client` — TypeScript types now available from `@prisma/client`.
+
+- [ ] **Step 3: Run the initial migration**
+
+```bash
+cd backend && npx prisma migrate dev --name init
+```
+
+Expected: Migration file created in `prisma/migrations/`, all four tables created in Supabase.
+
+- [ ] **Step 4: Write the seed script**
+
+The seed uses `upsert` so it is safe to run multiple times — it will not create duplicates.
+
+```ts
+// backend/prisma/seed.ts
+import { PrismaClient, RoomType } from '@prisma/client'
+
+const prisma = new PrismaClient()
+
+const PREDEFINED_ROOMS = [
+  { id: 'room-general', name: 'general', description: 'General chat for everyone' },
+  { id: 'room-tech',    name: 'tech',    description: 'Tech talk and coding' },
+  { id: 'room-random',  name: 'random',  description: 'Anything goes' },
+]
+
+async function main() {
+  for (const room of PREDEFINED_ROOMS) {
+    await prisma.room.upsert({
+      where:  { id: room.id },
+      update: {},
+      create: { ...room, type: RoomType.PREDEFINED },
+    })
+  }
+  console.log('Seeded predefined rooms.')
+}
+
+main()
+  .catch(console.error)
+  .finally(() => prisma.$disconnect())
+```
+
+- [ ] **Step 5: Run the seed**
+
+```bash
+cd backend && npx tsx prisma/seed.ts
+```
+
+Expected: `Seeded predefined rooms.`
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/prisma/
+git commit -m "feat: Prisma schema — User, Room, Message, RoomMember + seed"
+```
+
+---
+
+## Task 3: Shared Types + Prisma Singleton
+
+**Files:**
+- Create: `backend/src/types/index.ts`
+- Create: `backend/src/lib/prisma.ts`
+
+- [ ] **Step 1: Write shared TypeScript interfaces**
+
+Centralising types here means every file imports from one source. `AuthenticatedRequest` extends Express's `Request` so TypeScript knows `req.user` exists after the auth middleware runs.
+
+```ts
+// backend/src/types/index.ts
+import type { Request } from 'express'
+
+export interface JwtPayload {
+  userId: string
+  username: string
+  email: string
+}
+
+export interface RefreshPayload {
+  userId: string
+}
+
+export interface AuthenticatedRequest extends Request {
+  user: JwtPayload
+}
+```
+
+- [ ] **Step 2: Write the Prisma singleton**
+
+Node.js caches module imports, so this file gives you exactly one Prisma client across the whole server. Prisma manages a connection pool internally — you never want multiple instances of it.
+
+```ts
+// backend/src/lib/prisma.ts
+import { PrismaClient } from '@prisma/client'
+
+const globalForPrisma = globalThis as unknown as { prisma: PrismaClient }
+
+export const prisma = globalForPrisma.prisma ?? new PrismaClient()
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForPrisma.prisma = prisma
+}
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add backend/src/
+git commit -m "feat: shared types and Prisma client singleton"
+```
+
+---
+
+## Task 4: Express App + Server Entry
+
+**Files:**
+- Create: `backend/src/app.ts`
+- Create: `backend/src/index.ts`
+
+The `app` (Express) and the `httpServer` (Node's HTTP server) are kept in separate files. `supertest` can work directly with the Express app without starting a real port — that's why tests import from `app.ts`, not `index.ts`.
+
+- [ ] **Step 1: Write the Express app**
+
+```ts
+// backend/src/app.ts
+import 'dotenv/config'
+import express from 'express'
+import cors from 'cors'
+
+export const app = express()
+
+app.use(cors({ origin: process.env.CLIENT_ORIGIN, credentials: true }))
+app.use(express.json())
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok' })
+})
+```
+
+- [ ] **Step 2: Write the server entry point**
+
+Routes and the socket initialiser will be added in later tasks — the imports below will start compiling once those files exist.
+
+```ts
+// backend/src/index.ts
+import { createServer } from 'http'
+import { app } from './app'
+
+export const httpServer = createServer(app)
+
+const PORT = process.env.PORT ?? 4000
+httpServer.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`)
+})
+```
+
+- [ ] **Step 3: Start the dev server**
+
+```bash
+cd backend && npm run dev
+```
+
+Expected: `Server running on http://localhost:4000`
+
+- [ ] **Step 4: Verify the health endpoint**
+
+```bash
+curl http://localhost:4000/health
+```
+
+Expected: `{"status":"ok"}`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/src/app.ts backend/src/index.ts
+git commit -m "feat: Express app and HTTP server entry point"
+```
+
+---
+
+## Task 5: Auth Routes
+
+**Files:**
+- Create: `backend/src/routes/auth.ts`
+- Create: `backend/tests/auth.test.ts`
+- Modify: `backend/src/app.ts`
+
+**JWT recap:** The access token (15 min) proves who you are on each request. The refresh token (7 days) is used only to get a new access token when the old one expires. Storing the refresh token on the `User` model lets us invalidate it on logout — a token in the DB that doesn't match the presented token is rejected.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// backend/tests/auth.test.ts
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import request from 'supertest'
+import { app } from '../src/app'
+import { prisma } from '../src/lib/prisma'
+
+const TEST_EMAIL_MARKER = 'auth-test.com'
+
+beforeAll(async () => {
+  await prisma.user.deleteMany({ where: { email: { contains: TEST_EMAIL_MARKER } } })
+})
+
+afterAll(async () => {
+  await prisma.user.deleteMany({ where: { email: { contains: TEST_EMAIL_MARKER } } })
+  await prisma.$disconnect()
+})
+
+describe('POST /auth/register', () => {
+  it('creates a user and returns a token pair', async () => {
+    const res = await request(app).post('/auth/register').send({
+      username: 'testuser',
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    expect(res.status).toBe(201)
+    expect(res.body).toHaveProperty('accessToken')
+    expect(res.body).toHaveProperty('refreshToken')
+  })
+
+  it('rejects a duplicate email with 409', async () => {
+    const res = await request(app).post('/auth/register').send({
+      username: 'testuser2',
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    expect(res.status).toBe(409)
+  })
+
+  it('rejects missing fields with 400', async () => {
+    const res = await request(app).post('/auth/register').send({
+      email: `incomplete@${TEST_EMAIL_MARKER}`,
+    })
+    expect(res.status).toBe(400)
+  })
+})
+
+describe('POST /auth/login', () => {
+  it('returns a token pair for valid credentials', async () => {
+    const res = await request(app).post('/auth/login').send({
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toHaveProperty('accessToken')
+    expect(res.body).toHaveProperty('refreshToken')
+  })
+
+  it('rejects wrong password with 401', async () => {
+    const res = await request(app).post('/auth/login').send({
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'wrongpassword',
+    })
+    expect(res.status).toBe(401)
+  })
+
+  it('rejects unknown email with 401', async () => {
+    const res = await request(app).post('/auth/login').send({
+      email: `nobody@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('POST /auth/refresh', () => {
+  it('issues a new access token from a valid refresh token', async () => {
+    const login = await request(app).post('/auth/login').send({
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    const res = await request(app).post('/auth/refresh').send({
+      refreshToken: login.body.refreshToken,
+    })
+    expect(res.status).toBe(200)
+    expect(res.body).toHaveProperty('accessToken')
+  })
+
+  it('rejects an invalid refresh token with 401', async () => {
+    const res = await request(app).post('/auth/refresh').send({
+      refreshToken: 'invalid-token',
+    })
+    expect(res.status).toBe(401)
+  })
+})
+
+describe('POST /auth/logout', () => {
+  it('returns 204 and invalidates the refresh token', async () => {
+    const login = await request(app).post('/auth/login').send({
+      email: `testuser@${TEST_EMAIL_MARKER}`,
+      password: 'password123',
+    })
+    const res = await request(app).post('/auth/logout').send({
+      refreshToken: login.body.refreshToken,
+    })
+    expect(res.status).toBe(204)
+
+    const retry = await request(app).post('/auth/refresh').send({
+      refreshToken: login.body.refreshToken,
+    })
+    expect(retry.status).toBe(401)
+  })
+})
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd backend && npm test -- auth.test.ts
+```
+
+Expected: FAIL — `/auth/*` routes return 404.
+
+- [ ] **Step 3: Write the auth router**
+
+```ts
+// backend/src/routes/auth.ts
+import { Router, Request, Response } from 'express'
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
+import { prisma } from '../lib/prisma'
+import type { JwtPayload, RefreshPayload } from '../types/index'
+
+const router = Router()
+
+function signAccessToken(payload: JwtPayload): string {
+  return jwt.sign(payload, process.env.JWT_ACCESS_SECRET!, { expiresIn: '15m' })
+}
+
+function signRefreshToken(payload: RefreshPayload): string {
+  return jwt.sign(payload, process.env.JWT_REFRESH_SECRET!, { expiresIn: '7d' })
+}
+
+router.post('/register', async (req: Request, res: Response) => {
+  const { username, email, password } = req.body
+
+  if (!username || !email || !password) {
+    res.status(400).json({ message: 'username, email and password are required' })
+    return
+  }
+
+  const existing = await prisma.user.findFirst({
+    where: { OR: [{ email }, { username }] },
+  })
+  if (existing) {
+    res.status(409).json({ message: 'Email or username already taken' })
+    return
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10)
+  const user = await prisma.user.create({
+    data: { username, email, passwordHash },
+  })
+
+  const accessToken  = signAccessToken({ userId: user.id, username: user.username, email: user.email })
+  const refreshToken = signRefreshToken({ userId: user.id })
+
+  await prisma.user.update({ where: { id: user.id }, data: { refreshToken } })
+
+  res.status(201).json({ accessToken, refreshToken })
+})
+
+router.post('/login', async (req: Request, res: Response) => {
+  const { email, password } = req.body
+
+  const user = await prisma.user.findUnique({ where: { email } })
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    res.status(401).json({ message: 'Invalid credentials' })
+    return
+  }
+
+  const accessToken  = signAccessToken({ userId: user.id, username: user.username, email: user.email })
+  const refreshToken = signRefreshToken({ userId: user.id })
+
+  await prisma.user.update({ where: { id: user.id }, data: { refreshToken } })
+
+  res.json({ accessToken, refreshToken })
+})
+
+router.post('/refresh', async (req: Request, res: Response) => {
+  const { refreshToken } = req.body
+  if (!refreshToken) {
+    res.status(400).json({ message: 'refreshToken required' })
+    return
+  }
+
+  let payload: RefreshPayload
+  try {
+    payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET!) as RefreshPayload
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired refresh token' })
+    return
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: payload.userId } })
+  if (!user || user.refreshToken !== refreshToken) {
+    res.status(401).json({ message: 'Refresh token revoked' })
+    return
+  }
+
+  const accessToken = signAccessToken({ userId: user.id, username: user.username, email: user.email })
+  res.json({ accessToken })
+})
+
+router.post('/logout', async (req: Request, res: Response) => {
+  const { refreshToken } = req.body
+  if (refreshToken) {
+    await prisma.user.updateMany({
+      where: { refreshToken },
+      data:  { refreshToken: null },
+    })
+  }
+  res.status(204).send()
+})
+
+export default router
+```
+
+- [ ] **Step 4: Mount auth router in app.ts**
+
+Add these two lines to `backend/src/app.ts` after `app.use(express.json())`:
+
+```ts
+import authRouter from './routes/auth'
+
+app.use('/auth', authRouter)
+```
+
+- [ ] **Step 5: Run tests — all should pass**
+
+```bash
+cd backend && npm test -- auth.test.ts
+```
+
+Expected: All 9 tests PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/src/routes/auth.ts backend/src/app.ts backend/tests/auth.test.ts
+git commit -m "feat: auth routes — register, login, refresh, logout"
+```
+
+---
+
+## Task 6: Auth HTTP Middleware
+
+**Files:**
+- Create: `backend/src/middleware/auth.ts`
+
+This middleware is a standard Express middleware function. It runs before any route handler it is attached to, reads the `Authorization: Bearer <token>` header, and either attaches `req.user` and calls `next()` or immediately responds 401. Any handler that runs after it can trust `req.user` is set.
+
+- [ ] **Step 1: Write the middleware**
+
+```ts
+// backend/src/middleware/auth.ts
+import { Response, NextFunction } from 'express'
+import jwt from 'jsonwebtoken'
+import type { AuthenticatedRequest, JwtPayload } from '../types/index'
+
+export function authMiddleware(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): void {
+  const authHeader = req.headers.authorization
+  if (!authHeader?.startsWith('Bearer ')) {
+    res.status(401).json({ message: 'No token provided' })
+    return
+  }
+
+  const token = authHeader.slice(7)
+  try {
+    const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as JwtPayload
+    req.user = payload
+    next()
+  } catch {
+    res.status(401).json({ message: 'Invalid or expired token' })
+  }
+}
+```
+
+- [ ] **Step 2: Commit**
+
+The middleware is tested implicitly by the rooms tests in the next task.
+
+```bash
+git add backend/src/middleware/auth.ts
+git commit -m "feat: JWT auth middleware for HTTP routes"
+```
+
+---
+
+## Task 7: Rooms REST Endpoint
+
+**Files:**
+- Create: `backend/src/routes/rooms.ts`
+- Create: `backend/tests/rooms.test.ts`
+- Modify: `backend/src/app.ts`
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// backend/tests/rooms.test.ts
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import request from 'supertest'
+import { app } from '../src/app'
+import { prisma } from '../src/lib/prisma'
+
+const TEST_EMAIL = 'rooms-test@test.com'
+let accessToken: string
+
+beforeAll(async () => {
+  await prisma.user.deleteMany({ where: { email: TEST_EMAIL } })
+  const res = await request(app).post('/auth/register').send({
+    username: 'roomstestuser',
+    email: TEST_EMAIL,
+    password: 'password123',
+  })
+  accessToken = res.body.accessToken
+})
+
+afterAll(async () => {
+  await prisma.user.deleteMany({ where: { email: TEST_EMAIL } })
+  await prisma.$disconnect()
+})
+
+describe('GET /rooms', () => {
+  it('returns 401 without a token', async () => {
+    const res = await request(app).get('/rooms')
+    expect(res.status).toBe(401)
+  })
+
+  it('returns all rooms with isMember flag', async () => {
+    const res = await request(app)
+      .get('/rooms')
+      .set('Authorization', `Bearer ${accessToken}`)
+
+    expect(res.status).toBe(200)
+    expect(Array.isArray(res.body)).toBe(true)
+    expect(res.body.length).toBeGreaterThanOrEqual(3)
+    expect(res.body[0]).toHaveProperty('isMember')
+    expect(res.body.every((r: { isMember: boolean }) => !r.isMember)).toBe(true)
+  })
+
+  it('returns isMember: true after joining a room', async () => {
+    const roomsRes = await request(app)
+      .get('/rooms')
+      .set('Authorization', `Bearer ${accessToken}`)
+    const roomId = roomsRes.body[0].id
+
+    const user = await prisma.user.findUnique({ where: { email: TEST_EMAIL } })
+    await prisma.roomMember.create({ data: { userId: user!.id, roomId } })
+
+    const res = await request(app)
+      .get('/rooms')
+      .set('Authorization', `Bearer ${accessToken}`)
+
+    const joined = res.body.find((r: { id: string }) => r.id === roomId)
+    expect(joined.isMember).toBe(true)
+  })
+})
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd backend && npm test -- rooms.test.ts
+```
+
+Expected: FAIL — `/rooms` returns 404.
+
+- [ ] **Step 3: Write the rooms route**
+
+The `include` + `_count` trick lets Prisma compute `memberCount` and `isMember` in a single query — no N+1 problem.
+
+```ts
+// backend/src/routes/rooms.ts
+import { Router, Response } from 'express'
+import { authMiddleware } from '../middleware/auth'
+import { prisma } from '../lib/prisma'
+import type { AuthenticatedRequest } from '../types/index'
+
+const router = Router()
+
+router.get('/', authMiddleware, async (req: AuthenticatedRequest, res: Response) => {
+  const { userId } = req.user
+
+  const rooms = await prisma.room.findMany({
+    orderBy: { createdAt: 'asc' },
+    include: {
+      _count:  { select: { members: true } },
+      members: { where: { userId }, select: { id: true } },
+    },
+  })
+
+  const response = rooms.map(({ members, _count, ...room }) => ({
+    ...room,
+    memberCount: _count.members,
+    isMember: members.length > 0,
+  }))
+
+  res.json(response)
+})
+
+export default router
+```
+
+- [ ] **Step 4: Mount rooms router in app.ts**
+
+Add after the auth router mount:
+
+```ts
+import roomsRouter from './routes/rooms'
+
+app.use('/rooms', roomsRouter)
+```
+
+- [ ] **Step 5: Run all HTTP tests**
+
+```bash
+cd backend && npm test -- auth.test.ts rooms.test.ts
+```
+
+Expected: All tests PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add backend/src/routes/rooms.ts backend/src/app.ts backend/tests/rooms.test.ts
+git commit -m "feat: GET /rooms endpoint with isMember and memberCount"
+```
+
+---
+
+## Task 8: Socket.IO Setup + Handshake Middleware
+
+**Files:**
+- Create: `backend/src/socket/index.ts`
+- Create: `backend/src/socket/handlers/rooms.ts` (stub)
+- Create: `backend/src/socket/handlers/messages.ts` (stub)
+- Modify: `backend/src/index.ts`
+
+**Key concept — `io.use()` middleware:** Just like Express middleware runs before route handlers, `io.use()` runs before any socket event handler. If verification fails, we call `next(new Error(...))` and the connection is rejected before it even opens — no event handler ever runs without a verified user.
+
+**Key concept — personal socket room:** On every connection we call `socket.join(userId)`. This joins the socket to a channel named after the user's ID. Later, `io.to(userId).socketsJoin(roomId)` makes all of that user's sockets join a room at once — essential for DMs when the target user has multiple tabs open or reconnects after being offline.
+
+- [ ] **Step 1: Write stub handlers so the server compiles**
+
+```ts
+// backend/src/socket/handlers/rooms.ts
+import { Server, Socket } from 'socket.io'
+
+export function registerRoomHandlers(_io: Server, _socket: Socket): void {
+  // implemented in Task 9
+}
+```
+
+```ts
+// backend/src/socket/handlers/messages.ts
+import { Server, Socket } from 'socket.io'
+
+export function registerMessageHandlers(_io: Server, _socket: Socket): void {
+  // implemented in Task 10
+}
+```
+
+- [ ] **Step 2: Write the Socket.IO initialiser**
+
+```ts
+// backend/src/socket/index.ts
+import { Server } from 'socket.io'
+import type { Server as HttpServer } from 'http'
+import jwt from 'jsonwebtoken'
+import type { JwtPayload } from '../types/index'
+import { registerRoomHandlers } from './handlers/rooms'
+import { registerMessageHandlers } from './handlers/messages'
+
+export function initSocket(httpServer: HttpServer): Server {
+  const io = new Server(httpServer, {
+    cors: {
+      origin: process.env.CLIENT_ORIGIN,
+      credentials: true,
+    },
+  })
+
+  // Runs once per connection attempt, before any event handler
+  io.use((socket, next) => {
+    const token = socket.handshake.auth?.token as string | undefined
+    if (!token) return next(new Error('No token provided'))
+
+    try {
+      const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as JwtPayload
+      socket.data.user = payload
+      next()
+    } catch {
+      next(new Error('Invalid or expired token'))
+    }
+  })
+
+  io.on('connection', (socket) => {
+    const user = socket.data.user as JwtPayload
+    console.log(`[socket] connected: ${user.username} (${socket.id})`)
+
+    // Join personal room — enables io.to(userId).emit(...) targeting
+    socket.join(user.userId)
+
+    registerRoomHandlers(io, socket)
+    registerMessageHandlers(io, socket)
+
+    socket.on('disconnect', () => {
+      console.log(`[socket] disconnected: ${user.username} (${socket.id})`)
+    })
+  })
+
+  return io
+}
+```
+
+- [ ] **Step 3: Wire Socket.IO into the server entry**
+
+Replace `backend/src/index.ts` with:
+
+```ts
+// backend/src/index.ts
+import { createServer } from 'http'
+import { app } from './app'
+import { initSocket } from './socket/index'
+
+export const httpServer = createServer(app)
+export const io = initSocket(httpServer)
+
+const PORT = process.env.PORT ?? 4000
+httpServer.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`)
+})
+```
+
+- [ ] **Step 4: Run the dev server — verify no errors**
+
+```bash
+cd backend && npm run dev
+```
+
+Expected: `Server running on http://localhost:4000` — no TypeScript or runtime errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/src/socket/ backend/src/index.ts
+git commit -m "feat: Socket.IO setup with JWT handshake middleware"
+```
+
+---
+
+## Task 9: Socket Room Handlers
+
+**Files:**
+- Modify: `backend/src/socket/handlers/rooms.ts`
+- Create: `backend/tests/socket.test.ts`
+
+**Broadcast patterns — pay attention here:**
+- `socket.emit(event, data)` — sends only to **this** socket
+- `socket.to(roomId).emit(event, data)` — sends to everyone in the room **except this socket**
+- `io.to(roomId).emit(event, data)` — sends to everyone in the room **including this socket**
+- `io.emit(event, data)` — sends to **all** connected clients
+- `io.to(userId).socketsJoin(roomId)` — makes all sockets belonging to `userId` join a Socket.IO room
+
+- [ ] **Step 1: Write the failing socket tests**
+
+```ts
+// backend/tests/socket.test.ts
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { createServer } from 'http'
+import { AddressInfo } from 'net'
+import { io as ioc, Socket as ClientSocket } from 'socket.io-client'
+import jwt from 'jsonwebtoken'
+import { prisma } from '../src/lib/prisma'
+import { initSocket } from '../src/socket/index'
+import { app } from '../src/app'
+
+const TEST_MARKER = 'socket-test.com'
+
+let clientA: ClientSocket
+let clientB: ClientSocket
+let port: number
+let userAToken: string
+let userBToken: string
+let predefinedRoomId: string
+
+function makeToken(userId: string, username: string, email: string): string {
+  return jwt.sign(
+    { userId, username, email },
+    process.env.JWT_ACCESS_SECRET!,
+    { expiresIn: '15m' }
+  )
+}
+
+beforeAll(async () => {
+  await prisma.user.deleteMany({ where: { email: { contains: TEST_MARKER } } })
+
+  const userA = await prisma.user.create({
+    data: { username: 'socketUserA', email: `a@${TEST_MARKER}`, passwordHash: 'x' },
+  })
+  const userB = await prisma.user.create({
+    data: { username: 'socketUserB', email: `b@${TEST_MARKER}`, passwordHash: 'x' },
+  })
+
+  userAToken = makeToken(userA.id, userA.username, userA.email)
+  userBToken = makeToken(userB.id, userB.username, userB.email)
+
+  const predefined = await prisma.room.findFirst({ where: { type: 'PREDEFINED' } })
+  predefinedRoomId = predefined!.id
+
+  const httpServer = createServer(app)
+  initSocket(httpServer)
+  await new Promise<void>((resolve) => httpServer.listen(0, resolve))
+  port = (httpServer.address() as AddressInfo).port
+})
+
+afterAll(async () => {
+  clientA?.disconnect()
+  clientB?.disconnect()
+  await prisma.message.deleteMany({ where: { user: { email: { contains: TEST_MARKER } } } })
+  await prisma.roomMember.deleteMany({ where: { user: { email: { contains: TEST_MARKER } } } })
+  await prisma.user.deleteMany({ where: { email: { contains: TEST_MARKER } } })
+  await prisma.$disconnect()
+})
+
+function connect(token: string): Promise<ClientSocket> {
+  return new Promise((resolve, reject) => {
+    const socket = ioc(`http://localhost:${port}`, { auth: { token } })
+    socket.on('connect', () => resolve(socket))
+    socket.on('connect_error', reject)
+  })
+}
+
+describe('Socket handshake', () => {
+  it('rejects a connection with no token', async () => {
+    await expect(connect('')).rejects.toThrow()
+  })
+
+  it('accepts a connection with a valid token', async () => {
+    clientA = await connect(userAToken)
+    expect(clientA.connected).toBe(true)
+  })
+})
+
+describe('join-room', () => {
+  it('emits room-joined with room data and message history', async () => {
+    const result = await new Promise<{ room: { id: string }; messages: unknown[] }>((resolve) => {
+      clientA.emit('join-room', { roomId: predefinedRoomId })
+      clientA.once('room-joined', resolve)
+    })
+
+    expect(result.room.id).toBe(predefinedRoomId)
+    expect(Array.isArray(result.messages)).toBe(true)
+  })
+
+  it('creates a RoomMember record in the DB', async () => {
+    const user = await prisma.user.findFirst({ where: { email: `a@${TEST_MARKER}` } })
+    const member = await prisma.roomMember.findUnique({
+      where: { userId_roomId: { userId: user!.id, roomId: predefinedRoomId } },
+    })
+    expect(member).not.toBeNull()
+  })
+})
+
+describe('send-message', () => {
+  it('broadcasts new-message to all room members', async () => {
+    clientB = await connect(userBToken)
+
+    await new Promise<void>((resolve) => {
+      clientB.emit('join-room', { roomId: predefinedRoomId })
+      clientB.once('room-joined', () => resolve())
+    })
+
+    const received = await new Promise<{ content: string }>((resolve) => {
+      clientB.once('new-message', resolve)
+      clientA.emit('send-message', { roomId: predefinedRoomId, content: 'hello from A' })
+    })
+
+    expect(received.content).toBe('hello from A')
+  })
+
+  it('rejects send-message from a non-member', async () => {
+    const userC = await prisma.user.create({
+      data: { username: 'socketUserC', email: `c@${TEST_MARKER}`, passwordHash: 'x' },
+    })
+    const clientC = await connect(makeToken(userC.id, userC.username, userC.email))
+
+    const error = await new Promise<{ message: string }>((resolve) => {
+      clientC.once('error', resolve)
+      clientC.emit('send-message', { roomId: predefinedRoomId, content: 'sneaky' })
+    })
+
+    expect(error.message).toMatch(/not a member/)
+    clientC.disconnect()
+  })
+})
+
+describe('create-room', () => {
+  it('broadcasts room-created to all clients', async () => {
+    const created = await new Promise<{ room: { name: string } }>((resolve) => {
+      clientB.once('room-created', resolve)
+      clientA.emit('create-room', { name: 'test-room', description: 'a test room' })
+    })
+
+    expect(created.room.name).toBe('test-room')
+  })
+})
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd backend && npm test -- socket.test.ts
+```
+
+Expected: FAIL — stub handlers emit nothing.
+
+- [ ] **Step 3: Implement room handlers**
+
+```ts
+// backend/src/socket/handlers/rooms.ts
+import { Server, Socket } from 'socket.io'
+import { prisma } from '../../lib/prisma'
+import type { JwtPayload } from '../../types/index'
+
+const MESSAGE_HISTORY_LIMIT = 50
+
+export function registerRoomHandlers(io: Server, socket: Socket): void {
+  const user = socket.data.user as JwtPayload
+
+  socket.on('join-room', async ({ roomId }: { roomId: string }) => {
+    const room = await prisma.room.findUnique({ where: { id: roomId } })
+    if (!room) {
+      socket.emit('error', { message: 'Room not found' })
+      return
+    }
+
+    await prisma.roomMember.upsert({
+      where:  { userId_roomId: { userId: user.userId, roomId } },
+      update: {},
+      create: { userId: user.userId, roomId },
+    })
+
+    socket.join(roomId)
+
+    const messages = await prisma.message.findMany({
+      where:   { roomId },
+      orderBy: { createdAt: 'asc' },
+      take:    MESSAGE_HISTORY_LIMIT,
+      include: { user: { select: { id: true, username: true } } },
+    })
+
+    socket.emit('room-joined', { room, messages })
+    socket.to(roomId).emit('user-joined', {
+      user:   { id: user.userId, username: user.username },
+      roomId,
+    })
+  })
+
+  socket.on('leave-room', async ({ roomId }: { roomId: string }) => {
+    await prisma.roomMember.deleteMany({
+      where: { userId: user.userId, roomId },
+    })
+
+    socket.leave(roomId)
+    io.to(roomId).emit('user-left', {
+      user:   { id: user.userId, username: user.username },
+      roomId,
+    })
+  })
+
+  socket.on('create-room', async ({ name, description }: { name: string; description?: string }) => {
+    if (!name?.trim()) {
+      socket.emit('error', { message: 'Room name is required' })
+      return
+    }
+
+    const room = await prisma.room.create({
+      data: {
+        name: name.trim(),
+        description,
+        type: 'USER_CREATED',
+        createdById: user.userId,
+      },
+    })
+
+    io.emit('room-created', { room })
+  })
+
+  socket.on('open-dm', async ({ targetUserId }: { targetUserId: string }) => {
+    const target = await prisma.user.findUnique({ where: { id: targetUserId } })
+    if (!target) {
+      socket.emit('error', { message: 'User not found' })
+      return
+    }
+
+    const existing = await prisma.room.findFirst({
+      where: {
+        type: 'DIRECT',
+        AND: [
+          { members: { some: { userId: user.userId } } },
+          { members: { some: { userId: targetUserId } } },
+        ],
+      },
+    })
+
+    let room = existing
+    if (!room) {
+      room = await prisma.room.create({
+        data: {
+          name: `${user.username}-${target.username}`,
+          type: 'DIRECT',
+          members: {
+            create: [{ userId: user.userId }, { userId: targetUserId }],
+          },
+        },
+      })
+    }
+
+    socket.join(room.id)
+    io.to(targetUserId).socketsJoin(room.id)
+    socket.emit('dm-opened', { room })
+  })
+}
+```
+
+- [ ] **Step 4: Run socket tests**
+
+```bash
+cd backend && npm test -- socket.test.ts
+```
+
+Expected: All tests PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add backend/src/socket/handlers/rooms.ts backend/tests/socket.test.ts
+git commit -m "feat: socket room handlers — join, leave, create-room, open-dm"
+```
+
+---
+
+## Task 10: Socket Message Handler
+
+**Files:**
+- Modify: `backend/src/socket/handlers/messages.ts`
+
+The membership check is the server-side enforcement of the access control rule. Never rely on the client to enforce this — a determined client can emit any event to any room. Always verify on the server.
+
+- [ ] **Step 1: Verify the send-message tests from Task 9 are passing**
+
+```bash
+cd backend && npm test -- socket.test.ts
+```
+
+The `describe('send-message')` block covers this handler. Confirm those are passing before implementing.
+
+- [ ] **Step 2: Implement the message handler**
+
+```ts
+// backend/src/socket/handlers/messages.ts
+import { Server, Socket } from 'socket.io'
+import { prisma } from '../../lib/prisma'
+import type { JwtPayload } from '../../types/index'
+
+export function registerMessageHandlers(io: Server, socket: Socket): void {
+  const user = socket.data.user as JwtPayload
+
+  socket.on('send-message', async ({ roomId, content }: { roomId: string; content: string }) => {
+    if (!content?.trim()) {
+      socket.emit('error', { message: 'Message content cannot be empty' })
+      return
+    }
+
+    const membership = await prisma.roomMember.findUnique({
+      where: { userId_roomId: { userId: user.userId, roomId } },
+    })
+
+    if (!membership) {
+      socket.emit('error', { message: 'You are not a member of this room' })
+      return
+    }
+
+    const message = await prisma.message.create({
+      data:    { content: content.trim(), userId: user.userId, roomId },
+      include: { user: { select: { id: true, username: true } } },
+    })
+
+    io.to(roomId).emit('new-message', message)
+  })
+}
+```
+
+- [ ] **Step 3: Run the full test suite**
+
+```bash
+cd backend && npm test
+```
+
+Expected: All tests PASS across auth, rooms, and socket suites.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add backend/src/socket/handlers/messages.ts
+git commit -m "feat: send-message handler with membership enforcement"
+```
+
+---
+
+## Task 11: Backend Smoke Test + Tag
+
+- [ ] **Step 1: Run the complete test suite**
+
+```bash
+cd backend && npm test
+```
+
+Expected: All tests PASS. Zero failures.
+
+- [ ] **Step 2: Manual smoke test**
+
+```bash
+cd backend && npm run dev
+```
+
+In a second terminal:
+
+```bash
+curl http://localhost:4000/health
+
+curl -s -X POST http://localhost:4000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"smoketest","email":"smoke@test.com","password":"password123"}' | jq .
+
+TOKEN=$(curl -s -X POST http://localhost:4000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"smoke@test.com","password":"password123"}' | jq -r '.accessToken')
+
+curl -s http://localhost:4000/rooms -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+Expected: health returns `{"status":"ok"}`, register/login return `{ accessToken, refreshToken }`, rooms returns 3 predefined rooms each with `"isMember": false`.
+
+- [ ] **Step 3: Tag backend complete**
+
+```bash
+git tag backend-complete
+```

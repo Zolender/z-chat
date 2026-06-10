@@ -23,6 +23,7 @@ A real-time chat application built as a WebSocket learning exercise. Users regis
 **Frontend**
 - React + Vite + TypeScript
 - Tailwind CSS + Lucide Icons
+- Framer Motion (animations)
 - socket.io-client
 
 ---
