@@ -5,7 +5,7 @@ import { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToke
 
 const router = Router()
 
-router.post('register', async (req: Request, res: Response)=>{
+router.post('/register', async (req: Request, res: Response)=>{
     try{
         const {username, email, password} = req.body
         if(!username || !email || !password){
