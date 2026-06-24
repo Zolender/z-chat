@@ -1,7 +1,7 @@
 import {Router, Request, Response} from 'express'
 import bcrypt from 'bcryptjs'
 import {User} from '../models/User'
-import { signAccessToken, signRefreshToken, verifyAccessToken } from '../lib/jwt'
+import { signAccessToken, signRefreshToken, verifyAccessToken, verifyRefreshToken } from '../lib/jwt'
 
 const router = Router()
 
@@ -71,3 +71,46 @@ router.post('/login', async (req: Request, res: Response)=>{
         res.status(500).json({message: 'Internal server error'})
     }
 })
+
+router.post('/refresh', async(req: Request, res: Response)=>{
+    try{
+        const {refreshToken} = req.body
+        if(!refreshToken){
+            res.status(400).json({message: 'refreshToken is required'})
+            return
+        }
+
+        const payload = verifyRefreshToken(refreshToken)
+        const user = await User.findById(payload.userId)
+
+        if(!user || user.refreshToken !== refreshToken){
+            res.status(401).json({message: 'Invalid refresh token'})
+            return
+        }
+
+        const accessToken = signAccessToken({userId: user.id, username: user.username, email: user.email})
+        res.json({accessToken})
+    }catch(err){
+        console.error(err)
+        res.status(401).json({message: 'Invalid refresh token'})
+    }
+})
+
+router.post('/logout', async(req: Request, res: Response)=>{
+    try{
+        const {refreshToken} = req.body
+        if(!refreshToken){
+            res.status(400).json({message: 'refreshToken is required'})
+            return
+        }
+        const payload = verifyRefreshToken(refreshToken)
+        await User.findByIdAndUpdate(payload.userId, {refreshToken: null})
+
+        res.json({message: 'Logged out'})
+    }catch(err){
+        console.error(err)
+        res.status(401).json({message: 'Invalid refresh token'})
+    }
+})
+
+export default router
