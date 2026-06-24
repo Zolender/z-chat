@@ -28,7 +28,7 @@ describe('POST /auth/register', ()=>{
         })
         expect(res.status).toBe(201)
         expect(res.body).toHaveProperty('accessToken')
-        expect(res.body).toHaveProperty('refresToken')
+        expect(res.body).toHaveProperty('refreshToken')
         expect(res.body.user).toMatchObject({username: 'testuser', email:'test@example.com'})
     })
     it('returns 400 when fields are missing', async()=>{
@@ -98,21 +98,26 @@ describe('POST /auth/refresh', ()=>{
         expect(res.status).toBe(200)
         expect(res.body).toHaveProperty('accessToken')
     })
+
     it('returns 401 on invalid token', async ()=>{
-        const reg = await request(app).post('/auth/refresh').send({
+        const res = await request(app).post('/auth/refresh').send({ refreshToken: 'not.a.real.token' })
+        expect(res.status).toBe(401)
+    })
+})
+
+describe('POST /auth/logout', ()=>{
+    it('invalidates the refresh token', async ()=>{
+        const reg = await request(app).post('/auth/register').send({
             username: 'testuser',
             email: 'test@example.com',
             password: 'password123'
         })
         const {refreshToken} = reg.body
-        const logout = await request(app).post('/auth/logout').send({
-            refreshToken
-        })
+
+        const logout = await request(app).post('/auth/logout').send({ refreshToken })
         expect(logout.status).toBe(200)
 
-        const refresh = await request(app).post('/auth/refresh').send({
-            refreshToken
-        })
+        const refresh = await request(app).post('/auth/refresh').send({ refreshToken })
         expect(refresh.status).toBe(401)
     })
 })
