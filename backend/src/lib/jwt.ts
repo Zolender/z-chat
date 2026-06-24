@@ -7,7 +7,7 @@ export function signAccessToken(payload: JwtPayload): string {
 }
 
 export function signRefreshToken(payload: RefreshPayload): string {
-    return jwt.sign(payload, process.env.REFRESH_SECRET!, {expiresIn: '7d'})
+    return jwt.sign(payload, process.env.JWT_REFRESH_SECRET!, {expiresIn: '7d'})
 }
 
 export function verifyAccessToken(token: string): JwtPayload{
@@ -15,5 +15,5 @@ export function verifyAccessToken(token: string): JwtPayload{
 }
 
 export function verifyRefreshToken(token: string): RefreshPayload{
-    return jwt.verify(token, process.env.REFRESH_SECRET!) as RefreshPayload
+    return jwt.verify(token, process.env.JWT_REFRESH_SECRET!) as RefreshPayload
 }
